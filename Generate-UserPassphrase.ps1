@@ -23,6 +23,93 @@
 #
 # Portions of this script (notably Get-SecureRandomInt) were drafted with
 # AI assistance and have been reviewed and tested by a human.
+#
+# .NOTES Logging
+# When loaded as an Active Roles Script Module, the script writes Warning
+# and Error events to the Active Roles event log via the intrinsic
+# $EventLog object (EventLog.ReportEvent). Information-level events are
+# suppressed by default to keep the AR event log quiet. To enable them
+# while debugging, set $script:LogInfoToEventLog = $true below.
+#
+# When run standalone from a normal PowerShell host, the script uses
+# Write-Verbose / Write-Warning / Write-Error instead. Pass -Verbose to
+# New-Password to surface the Information messages.
+
+# Set to $true to emit Information-level events to the Active Roles event
+# log (cache lifecycle and, if enabled in onGetEffectivePolicy, per-
+# passphrase generation). Warning and Error events are always logged
+# regardless of this setting. Has no effect outside Active Roles.
+$script:LogInfoToEventLog = $false
+
+function Write-PassphraseLog {
+    # .SYNOPSIS
+    # Logs a message to the appropriate sink for the current host.
+    #
+    # .DESCRIPTION
+    # When the Active Roles intrinsic variables $EventLog and $Constants are
+    # in scope, the message is written to the AR event log via
+    # $EventLog.ReportEvent using the matching EDS_EVENTLOG_*_TYPE constant.
+    # Otherwise the message is dispatched to Write-Verbose, Write-Warning,
+    # or Write-Error.
+    #
+    # In Active Roles, Information-level events are emitted only when
+    # $script:LogInfoToEventLog is $true. Warning and Error events always
+    # go through.
+    #
+    # The Active Roles event log entry automatically includes request
+    # context (request ID, target object name, class, GUID, source
+    # container), so messages should describe what the script did, not
+    # which object it acted on.
+    [CmdletBinding()]
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Information', 'Warning', 'Error')]
+        [string]$Level,
+
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [string]$DetailMsg1,
+        [string]$DetailMsg2
+    )
+
+    $inActiveRoles = (Test-Path Variable:EventLog) -and (Test-Path Variable:Constants)
+
+    if ($inActiveRoles) {
+        if ($Level -eq 'Information' -and -not $script:LogInfoToEventLog) {
+            return
+        }
+
+        $type = switch ($Level) {
+            'Information' { $Constants.EDS_EVENTLOG_INFORMATION_TYPE }
+            'Warning'     { $Constants.EDS_EVENTLOG_WARNING_TYPE }
+            'Error'       { $Constants.EDS_EVENTLOG_ERROR_TYPE }
+        }
+
+        if ($PSBoundParameters.ContainsKey('DetailMsg2')) {
+            $EventLog.ReportEvent($type, $Message, $DetailMsg1, $DetailMsg2)
+        }
+        elseif ($PSBoundParameters.ContainsKey('DetailMsg1')) {
+            $EventLog.ReportEvent($type, $Message, $DetailMsg1)
+        }
+        else {
+            $EventLog.ReportEvent($type, $Message)
+        }
+        return
+    }
+
+    $parts = @($Message)
+    if ($PSBoundParameters.ContainsKey('DetailMsg1')) { $parts += $DetailMsg1 }
+    if ($PSBoundParameters.ContainsKey('DetailMsg2')) { $parts += $DetailMsg2 }
+    $combined = $parts -join [Environment]::NewLine
+
+    switch ($Level) {
+        'Information' { Write-Verbose $combined }
+        'Warning'     { Write-Warning $combined }
+        'Error'       { Write-Error   $combined }
+    }
+}
 
 function Get-SecureRandomInt {
     # .SYNOPSIS
@@ -61,7 +148,6 @@ function Get-SecureRandomInt {
         $null = $rng.Dispose()
     }
 }
-
 function Get-TitleCaseWord {
     # .SYNOPSIS
     # Converts a word to title case (first letter upper-case).
@@ -72,7 +158,6 @@ function Get-TitleCaseWord {
     $ti = (Get-Culture).TextInfo
     return $ti.ToTitleCase($Word.ToLowerInvariant())
 }
-
 function Test-EffWordListFile {
     # .SYNOPSIS
     # Validates that a candidate file parses as a complete EFF word list.
@@ -88,7 +173,6 @@ function Test-EffWordListFile {
         return $false
     }
 }
-
 function Get-EffWordListFromPath {
     # .SYNOPSIS
     # Reads and parses the EFF large word list from disk.
@@ -110,7 +194,6 @@ function Get-EffWordListFromPath {
 
     return $words.ToArray()
 }
-
 function Get-EffWordList {
     # .SYNOPSIS
     # Loads the EFF word list from a path after existence checks.
@@ -122,7 +205,6 @@ function Get-EffWordList {
 
     return (Get-EffWordListFromPath -Path $Path)
 }
-
 function Read-EffWordListMetadata {
     # .SYNOPSIS
     # Reads cache metadata JSON from disk when present and valid.
@@ -144,7 +226,6 @@ function Read-EffWordListMetadata {
         return $null
     }
 }
-
 function Write-EffWordListMetadata {
     # .SYNOPSIS
     # Writes cache metadata JSON alongside the cached word list.
@@ -180,7 +261,6 @@ function Write-EffWordListMetadata {
         }
     }
 }
-
 function Test-EffWordListNeedsRefresh {
     # .SYNOPSIS
     # Determines whether the cached word list should be refreshed.
@@ -217,7 +297,6 @@ function Test-EffWordListNeedsRefresh {
     $elapsed = [datetime]::UtcNow - $last.ToUniversalTime()
     return ($elapsed.TotalDays -ge [double]$IntervalDays)
 }
-
 function Update-EffWordListFromWeb {
     # .SYNOPSIS
     # Downloads the EFF word list and updates local cache metadata.
@@ -236,7 +315,10 @@ function Update-EffWordListFromWeb {
 
     $temp = Join-Path $dir ([System.IO.Path]::GetRandomFileName() + '.download')
     try {
-        $null = Write-Verbose "Downloading word list from $SourceUrl"
+        Write-PassphraseLog -Level Information `
+            -Message "Downloading EFF wordlist." `
+            -DetailMsg1 "Source URL: $SourceUrl"
+
         $null = Invoke-WebRequest -Uri $SourceUrl -OutFile $temp -UseBasicParsing
 
         if (-not (Test-EffWordListFile -Path $temp)) {
@@ -245,7 +327,11 @@ function Update-EffWordListFromWeb {
 
         $null = Move-Item -LiteralPath $temp -Destination $DestinationPath -Force
         $null = Write-EffWordListMetadata -MetaPath $MetaPath -LastCheckedUtc ([datetime]::UtcNow) -SourceUrl $SourceUrl -RefreshIntervalDays $RefreshIntervalDays -WordListFileName $WordListFileName
-        $null = Write-Verbose "Word list updated and metadata written to '$MetaPath'."
+
+        Write-PassphraseLog -Level Information `
+            -Message "EFF wordlist cache refreshed." `
+            -DetailMsg1 "Wordlist: $DestinationPath" `
+            -DetailMsg2 "Metadata: $MetaPath"
     }
     finally {
         if (Test-Path -LiteralPath $temp) {
@@ -253,7 +339,6 @@ function Update-EffWordListFromWeb {
         }
     }
 }
-
 function Ensure-EffWordListCache {
     # .SYNOPSIS
     # Ensures a valid local cache exists and refreshes it when due.
@@ -274,7 +359,8 @@ function Ensure-EffWordListCache {
     $needs = Test-EffWordListNeedsRefresh -WordListPath $WordListPath -MetaPath $MetaPath -IntervalDays $IntervalDays
 
     if (-not $needs) {
-        $null = Write-Verbose "Using cached word list (last checked within $IntervalDays days)."
+        Write-PassphraseLog -Level Information `
+            -Message "Using cached EFF wordlist (last checked within $IntervalDays days)."
         return
     }
 
@@ -285,7 +371,8 @@ function Ensure-EffWordListCache {
         if (-not (Test-EffWordListFile -Path $WordListPath)) {
             throw "Word list at '$WordListPath' is invalid or incomplete."
         }
-        $null = Write-Verbose 'SkipWordListUpdate: using existing file without contacting the network.'
+        Write-PassphraseLog -Level Information `
+            -Message 'SkipWordListUpdate set: using existing wordlist without contacting the network.'
         return
     }
 
@@ -294,7 +381,10 @@ function Ensure-EffWordListCache {
     }
     catch {
         if (Test-Path -LiteralPath $WordListPath) {
-            $null = Write-Warning "Could not refresh word list from ${SourceUrl}: $($_.Exception.Message). Using existing cache."
+            Write-PassphraseLog -Level Warning `
+                -Message "Could not refresh EFF wordlist; using existing cache." `
+                -DetailMsg1 "Source URL: $SourceUrl" `
+                -DetailMsg2 "Reason: $($_.Exception.Message)"
         }
         else {
             throw
@@ -337,6 +427,13 @@ function New-Password() {
     # .PARAMETER SkipWordListUpdate
     # When set, the script will never reach the network. A valid local
     # wordlist (cache or -WordListPath) must already exist.
+    #
+    # .NOTES
+    # Pass -Verbose (a CmdletBinding common parameter) to surface
+    # Information-level diagnostic messages in standalone use. In Active
+    # Roles, Information-level events are gated by
+    # $script:LogInfoToEventLog (declared at the top of the script).
+    [CmdletBinding()]
     param(
         [ValidateRange(1, [int]::MaxValue)]
         [int]$NumberOfWords = 3,
@@ -425,5 +522,15 @@ function onGetEffectivePolicy($request) {
     }
 
     $newPwd = New-Password -NumberOfWords 3 -WordSeparator "-" -Capitalisation $true -IncludeNumber $true
+
+    # Per-generation audit event. Gated by $script:LogInfoToEventLog (off by
+    # default) so it does not flood the AR event log in normal operation.
+    # Set $script:LogInfoToEventLog = $true at the top of this script to
+    # enable. The generated passphrase value is intentionally NOT logged;
+    # only the fact that one was generated. The AR engine already prepends
+    # the target user's context (name, GUID, container) to the entry.
+    Write-PassphraseLog -Level Information `
+        -Message "Generated a server-side passphrase for edsaPassword."
+
     $null = $request.SetEffectivePolicyInfo("edsaPassword", $constants.EDS_EPI_UI_GENERATED_VALUE, $newPwd)
 }

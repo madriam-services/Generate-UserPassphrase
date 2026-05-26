@@ -23,6 +23,10 @@ engine can issue generated passwords for the `edsaPassword` attribute, but the
 - Configurable word count, separator, capitalisation, and optional digit
   injection.
 - Active Roles integration via the `onGetEffectivePolicy` event handler.
+- Context-aware logging: writes to the Active Roles event log via the
+  intrinsic `$EventLog` object when running inside Active Roles, or to
+  the standard `Write-Verbose` / `Write-Warning` / `Write-Error` streams
+  when run standalone.
 
 [eff-wordlist]: https://www.eff.org/dice
 
@@ -84,6 +88,46 @@ password is server-side generated and supplies the generated value.
 - **`-SkipWordListUpdate`** &mdash; _Switch._
   Never contact the network; require the cache (or `-WordListPath`) to
   already be valid.
+
+`New-Password` is an advanced function (`[CmdletBinding()]`), so all of
+the standard PowerShell common parameters are supported &mdash; most
+notably `-Verbose`, which surfaces Information-level diagnostics in
+standalone use.
+
+## Logging
+
+The script chooses its log sink at runtime based on the host:
+
+- **Inside Active Roles**, Warning and Error events are written to the
+  Active Roles event log via the intrinsic `$EventLog.ReportEvent`
+  method, using `$Constants.EDS_EVENTLOG_WARNING_TYPE` /
+  `EDS_EVENTLOG_ERROR_TYPE` / `EDS_EVENTLOG_INFORMATION_TYPE` as
+  documented in the
+  [Active Roles SDK](https://support.oneidentity.com/active-roles/technical-documents).
+  AR automatically prepends the request context (request ID, target
+  object name, GUID, source container) to each entry, so script
+  messages describe *what* was done, not *which* object it was done to.
+- **Standalone**, the same calls are routed through `Write-Verbose`,
+  `Write-Warning`, and `Write-Error` so PowerShell's normal preference
+  variables and redirection (`-Verbose`, `-WarningAction`,
+  `*> file.log`, &hellip;) apply as expected.
+
+Information-level events are **suppressed by default in Active Roles**
+to keep the AR event log quiet. They cover cache lifecycle (download,
+refresh, fallback) and, optionally, a per-passphrase audit entry
+emitted from `onGetEffectivePolicy`. To enable them while debugging,
+set the script-scope toggle at the top of `Generate-UserPassphrase.ps1`:
+
+```powershell
+$script:LogInfoToEventLog = $true
+```
+
+Warning and Error events are always emitted regardless of the toggle.
+
+The per-passphrase audit entry never includes the generated value
+itself &mdash; only the fact that a passphrase was issued. The
+generated value is delivered exclusively through the Active Roles
+`SetEffectivePolicyInfo` API.
 
 ## Wordlist
 
