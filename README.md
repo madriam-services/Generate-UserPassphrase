@@ -1,10 +1,10 @@
 # Generate-UserPassphrase
 
-A PowerShell script that generates cryptographically random, Diceware-style
-passphrases from the EFF Large Wordlist. It is designed to drop into a
-[One Identity Active Roles] Script Module so that the Active Roles policy
-engine can issue generated passwords for the `edsaPassword` attribute, but the
-`New-Password` function is fully usable on its own from any PowerShell host.
+A PowerShell script for [One Identity Active Roles] that generates
+cryptographically random, Diceware-style passphrases from the EFF Large
+Wordlist. It loads as a Script Module bound to a Policy Object so the
+Active Roles policy engine can server-side-generate values for the
+`edsaPassword` attribute on user objects.
 
 [One Identity Active Roles]: https://www.oneidentity.com/products/active-roles/
 
@@ -23,47 +23,35 @@ engine can issue generated passwords for the `edsaPassword` attribute, but the
 - Configurable word count, separator, capitalisation, and optional digit
   injection.
 - Active Roles integration via the `onGetEffectivePolicy` event handler.
-- Context-aware logging: writes to the Active Roles event log via the
-  intrinsic `$EventLog` object when running inside Active Roles, or to
-  the standard `Write-Verbose` / `Write-Warning` / `Write-Error` streams
-  when run standalone.
+- Diagnostics written to the Active Roles event log via the intrinsic
+  `$EventLog.ReportEvent` method, with Information-level events
+  suppressed by default to keep the event log quiet in normal operation.
 
 [eff-wordlist]: https://www.eff.org/dice
 
 ## Requirements
 
-- Windows PowerShell 5.1 or PowerShell 7+
-- Network access on first run (or whenever the cache is older than the refresh
-  interval) unless `-SkipWordListUpdate` is supplied with a pre-staged
-  wordlist.
-- For Active Roles integration: a configured Active Roles environment in which
-  the script is loaded as a Script Module and bound to a Policy Object.
+- A configured Active Roles environment (8.x or later) able to load the
+  script as a Script Module and bind it to a Policy Object.
+- Network access from the Active Roles Administration Service host on
+  first run, and whenever the cache is older than the refresh interval,
+  unless `-SkipWordListUpdate` is supplied with a pre-staged wordlist.
 
 ## Usage
 
-### As a standalone function
+1. Import `Generate-UserPassphrase.ps1` as a Script Module in Active Roles.
+2. Define a new Policy Object, or include the module in an existing one.
+3. Apply the Policy Object to the OUs / containers where Active Roles
+   should server-side-generate the password.
 
-```powershell
-. .\Generate-UserPassphrase.ps1
-
-New-Password
-# -> Correct-Horse-Battery7
-
-New-Password -NumberOfWords 5 -WordSeparator '.' -Capitalisation $false -IncludeNumber $false
-# -> correct.horse.battery.staple.anvil
-```
-
-### Inside Active Roles
-
-1. Import `Generate-UserPassphrase.ps1` as a Script Module.
-2. Define a new or on include it in an existing policy object
-3. Apply the Policy Object to the OUs / containers where Active Roles should
-   server-side-generate the password.
-
-The `onGetEffectivePolicy` handler signals to the Active Roles UI that the
-password is server-side generated and supplies the generated value.
+The `onGetEffectivePolicy` handler signals to the Active Roles UI that
+the password is server-side generated and supplies the generated value.
 
 ### `New-Password` parameters
+
+These are the call-site parameters used by `onGetEffectivePolicy` &mdash;
+adjust the call in that handler to change behaviour for your
+installation.
 
 - **`-NumberOfWords`** &mdash; _Default: `3`._
   Number of words in the passphrase (&ge; 1).
@@ -77,46 +65,31 @@ password is server-side generated and supplies the generated value.
 - **`-IncludeNumber`** &mdash; _Default: `$true`._
   Append a single random digit (0&ndash;9) to one of the words.
 
-- **`-WordListPath`** &mdash; _Default: empty._
-  Override the cached wordlist path. When set, the cache logic is skipped
-  and the file at this path is used directly.
-
 - **`-WordListRefreshIntervalDays`** &mdash; _Default: `30`._
   How often (in days) the cached wordlist is re-fetched from the EFF
   (1&ndash;365).
 
 - **`-SkipWordListUpdate`** &mdash; _Switch._
-  Never contact the network; require the cache (or `-WordListPath`) to
-  already be valid.
-
-`New-Password` is an advanced function (`[CmdletBinding()]`), so all of
-the standard PowerShell common parameters are supported &mdash; most
-notably `-Verbose`, which surfaces Information-level diagnostics in
-standalone use.
+  Never contact the network; require the cache to already be valid.
 
 ## Logging
 
-The script chooses its log sink at runtime based on the host:
+All diagnostic output is written to the Active Roles event log via the
+intrinsic `$EventLog.ReportEvent` method, with the matching
+`$Constants.EDS_EVENTLOG_INFORMATION_TYPE` /
+`EDS_EVENTLOG_WARNING_TYPE` /
+`EDS_EVENTLOG_ERROR_TYPE` constant for each event level, as documented
+in the
+[Active Roles SDK](https://support.oneidentity.com/active-roles/technical-documents).
+Active Roles automatically prepends the request context (request ID,
+target object name, GUID, source container) to each entry, so script
+messages describe *what* was done, not *which* object it was done to.
 
-- **Inside Active Roles**, Warning and Error events are written to the
-  Active Roles event log via the intrinsic `$EventLog.ReportEvent`
-  method, using `$Constants.EDS_EVENTLOG_WARNING_TYPE` /
-  `EDS_EVENTLOG_ERROR_TYPE` / `EDS_EVENTLOG_INFORMATION_TYPE` as
-  documented in the
-  [Active Roles SDK](https://support.oneidentity.com/active-roles/technical-documents).
-  AR automatically prepends the request context (request ID, target
-  object name, GUID, source container) to each entry, so script
-  messages describe *what* was done, not *which* object it was done to.
-- **Standalone**, the same calls are routed through `Write-Verbose`,
-  `Write-Warning`, and `Write-Error` so PowerShell's normal preference
-  variables and redirection (`-Verbose`, `-WarningAction`,
-  `*> file.log`, &hellip;) apply as expected.
-
-Information-level events are **suppressed by default in Active Roles**
-to keep the AR event log quiet. They cover cache lifecycle (download,
-refresh, fallback) and, optionally, a per-passphrase audit entry
-emitted from `onGetEffectivePolicy`. To enable them while debugging,
-set the script-scope toggle at the top of `Generate-UserPassphrase.ps1`:
+Information-level events are **suppressed by default** to keep the AR
+event log quiet. They cover cache lifecycle (download, refresh,
+fallback) and, optionally, a per-passphrase audit entry emitted from
+`onGetEffectivePolicy`. To enable them while debugging, set the
+script-scope toggle at the top of `Generate-UserPassphrase.ps1`:
 
 ```powershell
 $script:LogInfoToEventLog = $true
@@ -136,12 +109,16 @@ The script uses the
 under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The wordlist
 itself is not redistributed in this repository; it is downloaded from
 `https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt` on first use
-and cached locally.
+and cached locally under
+`%ProgramData%\One Identity\Active Roles\eff_large_wordlist.txt` on the
+Active Roles Administration Service host.
 
-If the script can't reach the EFF, it will keep using a previously cached copy
-(if any) and emit a warning. If no cache exists and the network is
-unavailable, you can pre-stage the file and point at it with `-WordListPath`,
-optionally combined with `-SkipWordListUpdate`.
+If the script can't reach the EFF, it will keep using a previously cached
+copy (if any) and emit a warning event. If no cache exists and the
+network is unavailable, the policy will fail; to avoid that in an
+air-gapped or restricted-egress installation, pre-stage the file at the
+cache path above and pass `-SkipWordListUpdate` to `New-Password` from
+`onGetEffectivePolicy` so the script never tries to contact the EFF.
 
 ## Entropy
 
